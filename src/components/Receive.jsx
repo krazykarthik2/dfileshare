@@ -1,8 +1,13 @@
 import React, { useEffect, useRef, useState } from "react";
 import jsQR from "jsqr";
 import { Link } from "react-router-dom";
-
+import { toHumanBytes, toHumanSeconds } from "../util/util";
 const Receive = () => {
+  const [progress, setProgress] = useState(0);
+const [eta, setEta] = useState(null);
+const startTimeRef = useRef(null);
+
+
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const [fileInfo, setFileInfo] = useState(null);
@@ -11,40 +16,59 @@ const Receive = () => {
   const [message, setMessage] = useState("Waiting for QR scan...");
   const [qr, setQr] = useState(null);
 
-  const connectToWebSocket = (url) => {
-    const socket = new WebSocket(url);
-    socket.binaryType = "arraybuffer";
+const connectToWebSocket = (url) => {
+  const socket = new WebSocket(url);
+  socket.binaryType = "arraybuffer";
 
-    socket.onopen = () => {
-      setMessage("Connected. Waiting for file...");
-    };
-    socket.onmessage = (e) => {
-      console.log("Received message:", e.data);
-      if (typeof e.data === "string") {
-        try {
-          const meta = JSON.parse(e.data);
-          if (meta.filename && meta.type) {
-            setFileInfo(meta);
-            setMessage(`Receiving ${meta.filename}...`);
-          }
-        } catch (err) {
-          console.error("Invalid metadata string:", e.data);
-        }
-      } else {
-        console.log("Received binary chunk:", e.data.byteLength);
-        setReceivedChunks((prev) => [...prev, e.data]);
-      }
-      
-    };
+  let fileMeta = null;
+  let controller;
 
-    socket.onclose = () => {
-      setMessage("WebSocket connection closed.");
-    };
+  const stream = new ReadableStream({
+    start(c) {
+      controller = c;
+    },
+    cancel() {
+      socket.close();
+    }
+  });
 
-    socket.onerror = () => {
-      setMessage("WebSocket error.");
-    };
+  socket.onopen = () => {
+    setMessage("Connected. Waiting for file...");
   };
+
+  socket.onmessage = (e) => {
+    if (typeof e.data === "string") {
+      try {
+        const meta = JSON.parse(e.data);
+        if (meta.filename && meta.type) {
+          fileMeta = meta;
+          setFileInfo(meta);
+          setMessage(`Receiving ${meta.filename}...`);
+        }
+      } catch (err) {
+        console.error("Invalid metadata string:", e.data);
+      }
+    } else {
+      const chunk = new Uint8Array(e.data);
+      if (controller) {
+        controller.enqueue(chunk); // push to stream
+      }
+      setReceivedChunks((prev) => [...prev, chunk.buffer]); // still buffer for later
+      console.log("Received binary chunk:", chunk.byteLength);
+    }
+  };
+
+  socket.onclose = () => {
+    if (controller) controller.close();
+    setMessage("WebSocket connection closed.");
+  };
+
+  socket.onerror = () => {
+    setMessage("WebSocket error.");
+    if (controller) controller.error("WebSocket error.");
+  };
+};
+
   useEffect(() => {
     
       if (!fileInfo) {
@@ -53,15 +77,36 @@ const Receive = () => {
       }
 
       let receivedSize = receivedChunks.reduce((acc, chunk) => acc + chunk.byteLength, 0);
-      if(receivedSize !== fileInfo.size) {
+      if (!startTimeRef.current) startTimeRef.current = Date.now();
+const percent = Math.round((receivedSize / fileInfo.size) * 10000) / 100;
+setProgress(percent);
+
+const elapsed = (Date.now() - startTimeRef.current) / 1000; // in seconds
+const speed = receivedSize / elapsed; // bytes per sec
+const remaining = fileInfo.size - receivedSize;
+const estimatedTime = remaining / speed;
+
+setEta(Math.ceil(estimatedTime));
+
+      if(receivedSize < fileInfo.size) {
         console.log("Received chunks:", receivedChunks);
         console.log("Expected size:", fileInfo.size);
         console.log("Received size:", receivedSize);
         console.log("Received chunks count:", receivedChunks.length);
-        setMessage(`File received is not complete yet.at ${Math.round(receivedSize/fileInfo.size * 10000,2)/100}% bytes.`);
+        setMessage(`File received is not complete yet.\n${receivedChunks.length}/${fileInfo.totalChunks} chunks received`);
         return; 
       }
       try {
+        //delete extra data in recievedChunks 
+        let actSize = fileInfo.size
+        console.log(receivedChunks)
+        for( let i =0;i<receivedChunks.length;i++){
+          if(receivedChunks[i].byteLength>actSize){
+            // cut off extra bytes in the receivedChunks[i]
+            receivedChunks[i].slice(0,actSize)
+          }
+          actSize-=receivedChunks[i].byteLength
+        }
         const blob = new Blob(receivedChunks, { type: fileInfo.type });
         const url = URL.createObjectURL(blob);
         setDownloadUrl(url);
@@ -141,20 +186,40 @@ const Receive = () => {
         playsInline
       />
       <canvas ref={canvasRef} style={{ display: "none" }} />
-      <p className="mt-4 text-sm text-green-600">{message}</p>
+      <pre className="mt-4 text-sm text-green-600">{message}</pre>
+{fileInfo && progress < 100 && (
+  <div className="w-full max-w-md mt-2">
+    <div className="w-full bg-gray-200 rounded-full h-4">
+      <div
+        className="bg-green-600 h-4 rounded-full"
+        style={{ width: `${progress}%` }}
+      />
+    </div>
+    <div className="text-xs text-gray-600 mt-1 flex justify-between">
+      <span>{progress}%</span>
+      <span>{eta ? `~${toHumanSeconds(eta)} left` : 'Estimating...'}</span>
+    </div>
+  </div>
+)}
 
       {downloadUrl && fileInfo && (
         <a
           href={downloadUrl}
           download={fileInfo.filename}
           className="mt-4 px-4 py-2 bg-blue-600 text-white rounded"
+          accessKey="o"
         >
-          Download {fileInfo.filename}
+          <div className="flex">D<u>o</u>wnload {fileInfo.filename}</div>
+          <div className="flex">{" (" + toHumanBytes(fileInfo.size) + ")"}</div>
+          <div className="flex">{" (" + fileInfo.type + ")"}</div>
         </a>
       )}
 
-      <Link to="/" className="mt-6 text-blue-500 underline">
-        Back
+      <Link to="/" className="mt-6 text-blue-500" accessKey="b">
+        <u>B</u>ack
+      </Link>
+      <Link to="/send" className="mt-2 text-blue-500" accessKey="s">
+        <u>S</u>end File
       </Link>
     </div>
   );

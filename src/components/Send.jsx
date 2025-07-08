@@ -57,34 +57,53 @@ const Send = () => {
       return;
     }
 
+    const chunkSize = file.size > 3 * 1024 * 1024 ? 3 * 1024 * 1024 : file.size; // 256KB chunks for files > 1MB
+    const totalChunks = Math.ceil(file.size / chunkSize);
+    const meta = {
+      filename: file.name,
+      size: file.size,
+      type: file.type,
+      chunkSize: chunkSize,
+      totalChunks: totalChunks,
+    };
+
+    console.log("Sending metadata:", meta);
+    wsRef.current.send(JSON.stringify(meta));
+
+    let offset = 0;
+    let sentChunks = 0;
+
     const reader = new FileReader();
 
+    const readNextChunk = () => {
+      if (offset >= file.size) {
+        setStatus(
+          `Sent file: ${file.name} (${sentChunks}/${totalChunks} chunks) (${offset}/${file.size})bytes`
+        );
+        setCount((prev) => prev + 1);
+        return;
+      }
+
+      const chunk = file.slice(offset, offset + chunkSize);
+      reader.readAsArrayBuffer(chunk);
+    };
+
     reader.onload = () => {
-      const buffer = reader.result;
+      if (reader.result && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(reader.result);
+        sentChunks += 1;
+        offset += chunkSize;
 
-      // 1. Send metadata
-      const meta = {
-        filename: file.name,
-        size: file.size,
-        type: file.type,
-      };
-      console.log("Sending metadata:", meta);
-      console.log("Sending file buffer of size:", buffer.byteLength);
-
-      wsRef.current.send(JSON.stringify(meta));
-
-      // 2. Send file content
-      wsRef.current.send(buffer);
-
-      setStatus(`Sent file: ${file.name}`);
-      setCount((prev) => prev + 1);
+        setStatus(`Sending chunk ${sentChunks}...`);
+        readNextChunk();
+      }
     };
 
     reader.onerror = () => {
-      setStatus("Failed to read file.");
+      setStatus("Failed to read file chunk.");
     };
 
-    reader.readAsArrayBuffer(file);
+    readNextChunk();
   };
 
   return (
@@ -93,7 +112,7 @@ const Send = () => {
 
       <QRCode value={qrUrl} size={200} />
       <p className="mt-2 text-xs text-gray-600 break-all">{qrUrl}</p>
-    
+
       <input
         type="file"
         onChange={(e) => setFile(e.target.files?.[0] || null)}
@@ -109,10 +128,15 @@ const Send = () => {
         Send
       </button>
 
-      <p className="mt-2 text-sm text-green-600">{status}:{count}</p>
+      <p className="mt-2 text-sm text-green-600">
+        {status}:{count}
+      </p>
 
-      <Link to="/" className="mt-4 text-blue-500 underline">
-        Back
+      <Link to="/" className="mt-6 text-blue-500" accessKey="b">
+        <u>B</u>ack
+      </Link>
+      <Link to="/receive" className="mt-2 text-blue-500" accessKey="r">
+        <u>R</u>eceive File
       </Link>
     </div>
   );
